@@ -5,7 +5,6 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "gunicorn -w 1 -k gthread --threads 8 --timeout 900 -b 0.0.0.0:${PORT:-8000} app:app",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 3
   }
