@@ -1,0 +1,7 @@
+.venv
+__pycache__
+*.pyc
+.DS_Store
+.git
+.gitignore
+RAILWAY_DEPLOY_PROMPT.md

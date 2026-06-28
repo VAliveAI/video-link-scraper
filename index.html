@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Link Scraper</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #1a1d24;
+      --text: #e8eaed;
+      --muted: #9aa0a6;
+      --accent: #6366f1;
+      --accent-hover: #4f46e5;
+      --error: #ef4444;
+      --success: #22c55e;
+      --border: #2a2e37;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      width: 100%;
+      max-width: 560px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      font-weight: 600;
+    }
+    p.subtitle {
+      margin: 0 0 24px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    form { display: flex; flex-direction: column; gap: 12px; }
+    .row { display: flex; gap: 8px; }
+    .format-toggle {
+      display: inline-flex;
+      gap: 0;
+      background: #0f1115;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 3px;
+      align-self: flex-start;
+    }
+    .format-toggle label {
+      padding: 6px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--muted);
+      border-radius: 6px;
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.15s;
+    }
+    .format-toggle input[type="radio"] {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .format-toggle input[type="radio"]:checked + label {
+      background: var(--accent);
+      color: white;
+    }
+    input[type="url"] {
+      flex: 1;
+      padding: 12px 14px;
+      font-size: 14px;
+      background: #0f1115;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input[type="url"]:focus { border-color: var(--accent); }
+    button {
+      padding: 12px 20px;
+      font-size: 14px;
+      font-weight: 500;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover:not(:disabled) { background: var(--accent-hover); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status {
+      margin-top: 20px;
+      padding: 14px 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      display: none;
+    }
+    .status.show { display: block; }
+    .status.pending { background: #1e293b; color: #93c5fd; }
+    .status.done { background: #14532d; color: #bbf7d0; }
+    .status.error { background: #450a0a; color: #fecaca; }
+    .status a {
+      color: inherit;
+      font-weight: 600;
+      text-decoration: underline;
+    }
+    .spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 8px;
+      vertical-align: -2px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    footer {
+      margin-top: 20px;
+      font-size: 12px;
+      color: var(--muted);
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Video Link Scraper</h1>
+    <p class="subtitle">Paste a YouTube, Pinterest, or Instagram link to download the video.</p>
+    <form id="form">
+      <div class="format-toggle" role="radiogroup" aria-label="Download format">
+        <input type="radio" id="fmt-video" name="format" value="video" checked />
+        <label for="fmt-video">Video (mp4)</label>
+        <input type="radio" id="fmt-audio" name="format" value="audio" />
+        <label for="fmt-audio">Audio (mp3)</label>
+      </div>
+      <div class="row">
+        <input id="url" type="url" placeholder="YouTube, Pinterest, or Instagram URL" required />
+        <button type="submit" id="submit">Download</button>
+      </div>
+    </form>
+    <div id="status" class="status"></div>
+    <footer>Only download videos you have rights to. Respect each platform's terms of service.</footer>
+  </div>
+
+  <script>
+    const form = document.getElementById("form");
+    const urlInput = document.getElementById("url");
+    const submitBtn = document.getElementById("submit");
+    const statusEl = document.getElementById("status");
+
+    function setStatus(kind, html) {
+      statusEl.className = "status show " + kind;
+      statusEl.innerHTML = html;
+    }
+
+    async function poll(jobId) {
+      const res = await fetch(`/api/status/${jobId}`);
+      const data = await res.json();
+      if (data.status === "pending") {
+        setStatus("pending", `<span class="spinner"></span>Downloading...`);
+        setTimeout(() => poll(jobId), 1500);
+      } else if (data.status === "done") {
+        const safeTitle = (data.title || "video").replace(/[<>&"]/g, c =>
+          ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c])
+        );
+        setStatus("done", `Ready: ${safeTitle} &nbsp; <a href="${data.download_url}">Click to download</a>`);
+        submitBtn.disabled = false;
+      } else {
+        setStatus("error", `Error: ${data.error || "Download failed"}`);
+        submitBtn.disabled = false;
+      }
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      submitBtn.disabled = true;
+      setStatus("pending", `<span class="spinner"></span>Starting...`);
+      try {
+        const audioOnly = document.getElementById("fmt-audio").checked;
+        const res = await fetch("/api/download", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: urlInput.value, audio_only: audioOnly }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setStatus("error", `Error: ${data.error || "Request failed"}`);
+          submitBtn.disabled = false;
+          return;
+        }
+        poll(data.job_id);
+      } catch (err) {
+        setStatus("error", `Error: ${err.message}`);
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
