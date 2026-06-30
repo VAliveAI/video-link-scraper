@@ -132,6 +132,8 @@ ALLOWED_HOSTS = re.compile(
 
 INSTAGRAM_RE = re.compile(r"^(https?://)?([\w-]+\.)*(instagram\.com|instagr\.am)/", re.IGNORECASE)
 
+YOUTUBE_RE = re.compile(r"^(https?://)?([\w-]+\.)*(youtube\.com|youtu\.be)(/|$)", re.IGNORECASE)
+
 
 def is_allowed_url(url: str) -> bool:
     return bool(ALLOWED_HOSTS.match(url.strip()))
@@ -139,6 +141,10 @@ def is_allowed_url(url: str) -> bool:
 
 def is_instagram_url(url: str) -> bool:
     return bool(INSTAGRAM_RE.match(url.strip()))
+
+
+def is_youtube_url(url: str) -> bool:
+    return bool(YOUTUBE_RE.match(url.strip()))
 
 
 def download_video(job_id: str, url: str, audio_only: bool = False) -> None:
@@ -208,6 +214,15 @@ def download_video(job_id: str, url: str, audio_only: bool = False) -> None:
             match = _find_browser_with_instagram_session()
             if match:
                 ydl_opts["cookiesfrombrowser"] = match
+    # YouTube gates some videos (e.g. licensed "- Topic" tracks) behind a
+    # "sign in to confirm you're not a bot" check that the PO token alone can't
+    # satisfy from a datacenter IP. This is opt-in: only when YT_COOKIES_FILE is
+    # set do we attach a logged-in cookies file for YouTube. Left unset, YouTube
+    # behaves as before (PO token only), avoiding the over-restriction noted above.
+    elif is_youtube_url(url):
+        yt_cookie_file = os.environ.get("YT_COOKIES_FILE")
+        if yt_cookie_file and Path(yt_cookie_file).exists():
+            ydl_opts["cookiefile"] = yt_cookie_file
 
     try:
         with YoutubeDL(ydl_opts) as ydl:
