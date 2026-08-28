@@ -658,17 +658,49 @@ def diag():
                 results[f"clean:{client}"] = f"OK: {i.get('title')} ({len(i.get('formats') or [])} formats)"
             except Exception as e:
                 results[f"clean:{client}"] = f"{type(e).__name__}: {str(e)[:220]}"
-        # And the stored cookies, default client.
-        opts = dict(base)
-        apply_cookies(opts, "youtube")
-        if "cookiefile" in opts:
-            try:
-                with YoutubeDL(opts) as ydl:
-                    i = ydl.extract_info(url, download=False)
-                results["cookies:default"] = f"OK: {i.get('title')} ({len(i.get('formats') or [])} formats)"
-            except Exception as e:
-                results["cookies:default"] = f"{type(e).__name__}: {str(e)[:220]}"
         info["extraction"] = results
+
+    # Deep debug for one client: capture yt-dlp's [pot] log lines and run the
+    # bgutil script directly so we can see whether a PO token is minted.
+    if request.args.get("debug") == "1" and url and site_for_url(url) == "youtube":
+        logs: list[str] = []
+
+        class _Logger:
+            def debug(self, m): logs.append(m)
+            def info(self, m): logs.append(m)
+            def warning(self, m): logs.append(f"WARN {m}")
+            def error(self, m): logs.append(f"ERR {m}")
+
+        client = request.args.get("clients", "mweb").split(",")[0]
+        opts = {
+            "quiet": True, "verbose": True, "skip_download": True, "noplaylist": True,
+            "logger": _Logger(), "extractor_args": {"youtube": {"player_client": [client]}},
+        }
+        if NODE_PATH:
+            opts["js_runtimes"] = {"node": {"path": NODE_PATH}}
+        if pot_script:
+            opts["extractor_args"]["youtubepot-bgutilscript"] = {"script_path": [pot_script]}
+        try:
+            with YoutubeDL(opts) as ydl:
+                ydl.extract_info(url, download=False)
+        except Exception as e:
+            logs.append(f"EXC {type(e).__name__}: {str(e)[:200]}")
+        info["pot_debug"] = [l for l in logs if "pot" in l.lower() or "token" in l.lower()][:40]
+
+        # Run the bgutil script directly.
+        if pot_script:
+            try:
+                proc = subprocess.run(
+                    [NODE_PATH or "node", pot_script, "-v", "HBMy-y2wb4I"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                info["pot_script_run"] = {
+                    "returncode": proc.returncode,
+                    "stdout": (proc.stdout or "")[:400],
+                    "stderr": (proc.stderr or "")[:400],
+                }
+            except Exception as e:
+                info["pot_script_run"] = f"{type(e).__name__}: {str(e)[:200]}"
 
     return jsonify(info)
 
