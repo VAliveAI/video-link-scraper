@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    NODE_MAJOR=20 \
+    NODE_MAJOR=22 \
     BGUTIL_POT_HOME=/opt/bgutil-pot
 
 # System deps: ffmpeg for video/audio merging+encoding, Node.js for bgutil-pot
