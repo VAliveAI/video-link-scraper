@@ -640,20 +640,34 @@ def diag():
         if pot_script:
             base["extractor_args"]["youtubepot-bgutilscript"] = {"script_path": [pot_script]}
 
+        # Try a range of player clients (clean, no cookies) to see which, if
+        # any, gets past the datacenter bot gate. The winner gets baked in.
+        clients_param = request.args.get("clients")
+        client_sets = (
+            [c.strip() for c in clients_param.split(",")] if clients_param
+            else ["default", "tv", "tv_embedded", "mweb", "web_safari", "ios", "android_vr"]
+        )
         results = {}
-        for label, use_cookies in (("clean", False), ("cookies", True)):
+        for client in client_sets:
             opts = dict(base)
-            if use_cookies:
-                apply_cookies(opts, "youtube")
-                if "cookiefile" not in opts:
-                    results[label] = "skipped (no cookies available)"
-                    continue
+            opts["extractor_args"] = dict(base["extractor_args"])
+            opts["extractor_args"]["youtube"] = {"player_client": [client]}
             try:
                 with YoutubeDL(opts) as ydl:
                     i = ydl.extract_info(url, download=False)
-                results[label] = f"OK: {i.get('title')} ({len(i.get('formats') or [])} formats)"
+                results[f"clean:{client}"] = f"OK: {i.get('title')} ({len(i.get('formats') or [])} formats)"
             except Exception as e:
-                results[label] = f"{type(e).__name__}: {str(e)[:400]}"
+                results[f"clean:{client}"] = f"{type(e).__name__}: {str(e)[:220]}"
+        # And the stored cookies, default client.
+        opts = dict(base)
+        apply_cookies(opts, "youtube")
+        if "cookiefile" in opts:
+            try:
+                with YoutubeDL(opts) as ydl:
+                    i = ydl.extract_info(url, download=False)
+                results["cookies:default"] = f"OK: {i.get('title')} ({len(i.get('formats') or [])} formats)"
+            except Exception as e:
+                results["cookies:default"] = f"{type(e).__name__}: {str(e)[:220]}"
         info["extraction"] = results
 
     return jsonify(info)
