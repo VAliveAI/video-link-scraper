@@ -381,41 +381,84 @@ def download_video(job_id: str, url: str, audio_only: bool = False) -> None:
                 "merge_output_format": "mp4",
             })
 
-        apply_cookies(ydl_opts, site)
+        # Cookies are not universally good. Instagram/X need them; YouTube is
+        # often *broken* by them (a session captured mid-rotation comes back as
+        # "The page needs to be reloaded"), yet needs them when the server's IP
+        # is bot-blocked. So try the order most likely to work, then fall back.
+        if site == "youtube":
+            attempts = [False, True]      # clean first, cookies only if blocked
+        elif site in COOKIE_SITES:
+            attempts = [True, False]      # auth first, clean as a long shot
+        else:
+            attempts = [False]
 
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if "entries" in info:
-                    info = info["entries"][0]
+        last_error = None
 
-                filename = Path(ydl.prepare_filename(info))
-                # Post-processing rewrites extensions, so resolve what's on disk.
-                preferred_ext = ".mp3" if audio_only else ".mp4"
-                if not filename.exists() or filename.suffix != preferred_ext:
-                    vid_id = info.get("id", "")
-                    matches = [p for p in job_dir.glob(f"*{vid_id}*") if p.is_file()]
-                    preferred = [p for p in matches if p.suffix == preferred_ext]
-                    if preferred:
-                        filename = preferred[0]
-                    elif matches:
-                        filename = max(matches, key=lambda p: p.stat().st_size)
+        for use_cookies in attempts:
+            opts = dict(ydl_opts)
+            opts.pop("cookiefile", None)
+            opts.pop("cookiesfrombrowser", None)
+            if use_cookies:
+                apply_cookies(opts, site)
+                if "cookiefile" not in opts and "cookiesfrombrowser" not in opts:
+                    continue  # nothing to add; retrying would be identical
 
-                if not audio_only and filename.exists():
-                    _update(job_id, status="processing", progress=99)
-                    filename = ensure_quicktime_compatible(filename)
+            # Clear partials so a failed attempt can't be mistaken for output.
+            for leftover in job_dir.glob("*"):
+                if leftover.is_file():
+                    leftover.unlink(missing_ok=True)
 
-                _update(
-                    job_id,
-                    status="done",
-                    progress=100,
-                    file=filename,
-                    title=info.get("title") or filename.stem,
-                )
-        except DownloadError as e:
-            _update(job_id, status="error", error=_friendly_error(str(e), site))
-        except Exception as e:
-            _update(job_id, status="error", error=f"Unexpected error: {e}")
+            try:
+                with YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if "entries" in info:
+                        info = info["entries"][0]
+
+                    filename = Path(ydl.prepare_filename(info))
+                    # Post-processing rewrites extensions, so resolve what's on disk.
+                    preferred_ext = ".mp3" if audio_only else ".mp4"
+                    if not filename.exists() or filename.suffix != preferred_ext:
+                        vid_id = info.get("id", "")
+                        matches = [p for p in job_dir.glob(f"*{vid_id}*") if p.is_file()]
+                        preferred = [p for p in matches if p.suffix == preferred_ext]
+                        if preferred:
+                            filename = preferred[0]
+                        elif matches:
+                            filename = max(matches, key=lambda p: p.stat().st_size)
+
+                    if not audio_only and filename.exists():
+                        _update(job_id, status="processing", progress=99)
+                        filename = ensure_quicktime_compatible(filename)
+
+                    _update(
+                        job_id,
+                        status="done",
+                        progress=100,
+                        file=filename,
+                        title=info.get("title") or filename.stem,
+                    )
+                    return
+            except DownloadError as e:
+                last_error = str(e)
+                if not _is_auth_error(last_error):
+                    break
+                _update(job_id, progress=0)
+            except Exception as e:
+                last_error = f"Unexpected error: {e}"
+                break
+
+        _update(job_id, status="error", error=_friendly_error(last_error or "Download failed", site))
+
+
+def _is_auth_error(msg: str) -> bool:
+    """True when a failure might be fixed by changing the cookie strategy."""
+    needles = (
+        "not a bot", "page needs to be reloaded", "login required", "Sign in",
+        "empty media response", "Requested format is not available",
+        "cookies", "private", "age",
+    )
+    low = msg.lower()
+    return any(n.lower() in low for n in needles)
 
 
 def _friendly_error(msg: str, site: Optional[str]) -> str:
@@ -429,6 +472,10 @@ def _friendly_error(msg: str, site: Optional[str]) -> str:
     if "confirm you" in msg and "not a bot" in msg:
         return ("YouTube is blocking this server's IP. Add YouTube cookies "
                 "(YT_COOKIES_B64) to get past the bot check.")
+    if "page needs to be reloaded" in msg.lower():
+        return ("YouTube rejected the saved cookies (the browser session rotated "
+                "since they were exported). Re-export them from a private window "
+                "and update YT_COOKIES_B64.")
     if "No video could be found" in msg:
         return "No video found at that link — it may be an image-only post."
     if "Private" in msg or "not available" in msg:
