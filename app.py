@@ -17,7 +17,14 @@ from flask import Flask, abort, jsonify, render_template, request, send_file
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-APP_VERSION = "2026.08.27-batch"
+APP_VERSION = "2026.08.28-jsruntime"
+
+# yt-dlp now needs a JavaScript runtime to solve YouTube's nsig/player
+# challenges. Its built-in default is Deno, which we don't ship; Node is in the
+# image (and via nvm locally), so resolve it once at import and hand yt-dlp an
+# explicit path. Without a runtime, formats silently degrade and YouTube's
+# bot-check trips far more often. Resolved lazily-ish here so it's shared.
+NODE_PATH = shutil.which("node")
 
 app = Flask(__name__)
 
@@ -358,6 +365,10 @@ def download_video(job_id: str, url: str, audio_only: bool = False) -> None:
             "progress_hooks": [progress_hook],
             "extractor_args": {},
         }
+
+        # Give yt-dlp a real JS runtime for nsig/player-challenge solving.
+        if NODE_PATH:
+            ydl_opts["js_runtimes"] = {"node": {"path": NODE_PATH}}
 
         if pot_script:
             ydl_opts["extractor_args"]["youtubepot-bgutilscript"] = {"script_path": [str(pot_script)]}
