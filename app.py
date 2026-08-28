@@ -594,6 +594,71 @@ def get_file(job_id: str):
     return send_file(path, as_attachment=True, download_name=path.name)
 
 
+@app.route("/api/diag")
+def diag():
+    """Temporary diagnostics: what the container sees for YouTube extraction.
+
+    Reports the JS runtime / PO-token wiring and, if ?url= is given, runs an
+    info-only extraction with cookies off then on, returning the raw yt-dlp
+    error for each so we can see the true failure behind the friendly message.
+    """
+    if os.environ.get("DIAG_TOKEN") and request.args.get("token") != os.environ["DIAG_TOKEN"]:
+        abort(404)
+
+    pot_script = next(
+        (str(p) for p in (
+            Path(os.environ.get("BGUTIL_POT_HOME", "/opt/bgutil-pot")) / "server/build/generate_once.js",
+            Path.home() / "bgutil-pot/server/build/generate_once.js",
+        ) if p.exists()),
+        None,
+    )
+    info = {
+        "version": APP_VERSION,
+        "node_path": NODE_PATH,
+        "pot_script": pot_script,
+        "yt_cookies_b64_present": bool(os.environ.get("YT_COOKIES_B64")),
+        "yt_cookies_txt_present": bool(os.environ.get("YT_COOKIES_TXT")),
+        "yt_cookie_has_SID": None,
+    }
+    cookiefile = _cookies_from_env("youtube")
+    info["yt_cookiefile_resolved"] = bool(cookiefile)
+    raw = os.environ.get("YT_COOKIES_B64")
+    if raw:
+        try:
+            info["yt_cookie_has_SID"] = "SID" in base64.b64decode(raw).decode("utf-8", "ignore")
+        except Exception:
+            info["yt_cookie_has_SID"] = "decode-failed"
+
+    url = request.args.get("url")
+    if url and site_for_url(url) == "youtube":
+        base = {
+            "quiet": True, "no_warnings": True, "skip_download": True,
+            "noplaylist": True, "extractor_args": {},
+        }
+        if NODE_PATH:
+            base["js_runtimes"] = {"node": {"path": NODE_PATH}}
+        if pot_script:
+            base["extractor_args"]["youtubepot-bgutilscript"] = {"script_path": [pot_script]}
+
+        results = {}
+        for label, use_cookies in (("clean", False), ("cookies", True)):
+            opts = dict(base)
+            if use_cookies:
+                apply_cookies(opts, "youtube")
+                if "cookiefile" not in opts:
+                    results[label] = "skipped (no cookies available)"
+                    continue
+            try:
+                with YoutubeDL(opts) as ydl:
+                    i = ydl.extract_info(url, download=False)
+                results[label] = f"OK: {i.get('title')} ({len(i.get('formats') or [])} formats)"
+            except Exception as e:
+                results[label] = f"{type(e).__name__}: {str(e)[:400]}"
+        info["extraction"] = results
+
+    return jsonify(info)
+
+
 @app.route("/api/health")
 def health():
     with jobs_lock:
