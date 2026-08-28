@@ -17,7 +17,7 @@ from flask import Flask, abort, jsonify, render_template, request, send_file
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-APP_VERSION = "2026.08.28-jsruntime"
+APP_VERSION = "2026.08.28-node22"
 
 # yt-dlp now needs a JavaScript runtime to solve YouTube's nsig/player
 # challenges. Its built-in default is Deno, which we don't ship; Node is in the
@@ -592,117 +592,6 @@ def get_file(job_id: str):
     if not path.exists():
         abort(404)
     return send_file(path, as_attachment=True, download_name=path.name)
-
-
-@app.route("/api/diag")
-def diag():
-    """Temporary diagnostics: what the container sees for YouTube extraction.
-
-    Reports the JS runtime / PO-token wiring and, if ?url= is given, runs an
-    info-only extraction with cookies off then on, returning the raw yt-dlp
-    error for each so we can see the true failure behind the friendly message.
-    """
-    if os.environ.get("DIAG_TOKEN") and request.args.get("token") != os.environ["DIAG_TOKEN"]:
-        abort(404)
-
-    pot_script = next(
-        (str(p) for p in (
-            Path(os.environ.get("BGUTIL_POT_HOME", "/opt/bgutil-pot")) / "server/build/generate_once.js",
-            Path.home() / "bgutil-pot/server/build/generate_once.js",
-        ) if p.exists()),
-        None,
-    )
-    info = {
-        "version": APP_VERSION,
-        "node_path": NODE_PATH,
-        "pot_script": pot_script,
-        "yt_cookies_b64_present": bool(os.environ.get("YT_COOKIES_B64")),
-        "yt_cookies_txt_present": bool(os.environ.get("YT_COOKIES_TXT")),
-        "yt_cookie_has_SID": None,
-    }
-    cookiefile = _cookies_from_env("youtube")
-    info["yt_cookiefile_resolved"] = bool(cookiefile)
-    raw = os.environ.get("YT_COOKIES_B64")
-    if raw:
-        try:
-            info["yt_cookie_has_SID"] = "SID" in base64.b64decode(raw).decode("utf-8", "ignore")
-        except Exception:
-            info["yt_cookie_has_SID"] = "decode-failed"
-
-    url = request.args.get("url")
-    if url and site_for_url(url) == "youtube":
-        base = {
-            "quiet": True, "no_warnings": True, "skip_download": True,
-            "noplaylist": True, "extractor_args": {},
-        }
-        if NODE_PATH:
-            base["js_runtimes"] = {"node": {"path": NODE_PATH}}
-        if pot_script:
-            base["extractor_args"]["youtubepot-bgutilscript"] = {"script_path": [pot_script]}
-
-        # Try a range of player clients (clean, no cookies) to see which, if
-        # any, gets past the datacenter bot gate. The winner gets baked in.
-        clients_param = request.args.get("clients")
-        client_sets = (
-            [c.strip() for c in clients_param.split(",")] if clients_param
-            else ["default", "tv", "tv_embedded", "mweb", "web_safari", "ios", "android_vr"]
-        )
-        results = {}
-        for client in client_sets:
-            opts = dict(base)
-            opts["extractor_args"] = dict(base["extractor_args"])
-            opts["extractor_args"]["youtube"] = {"player_client": [client]}
-            try:
-                with YoutubeDL(opts) as ydl:
-                    i = ydl.extract_info(url, download=False)
-                results[f"clean:{client}"] = f"OK: {i.get('title')} ({len(i.get('formats') or [])} formats)"
-            except Exception as e:
-                results[f"clean:{client}"] = f"{type(e).__name__}: {str(e)[:220]}"
-        info["extraction"] = results
-
-    # Deep debug for one client: capture yt-dlp's [pot] log lines and run the
-    # bgutil script directly so we can see whether a PO token is minted.
-    if request.args.get("debug") == "1" and url and site_for_url(url) == "youtube":
-        logs: list[str] = []
-
-        class _Logger:
-            def debug(self, m): logs.append(m)
-            def info(self, m): logs.append(m)
-            def warning(self, m): logs.append(f"WARN {m}")
-            def error(self, m): logs.append(f"ERR {m}")
-
-        client = request.args.get("clients", "mweb").split(",")[0]
-        opts = {
-            "quiet": True, "verbose": True, "skip_download": True, "noplaylist": True,
-            "logger": _Logger(), "extractor_args": {"youtube": {"player_client": [client]}},
-        }
-        if NODE_PATH:
-            opts["js_runtimes"] = {"node": {"path": NODE_PATH}}
-        if pot_script:
-            opts["extractor_args"]["youtubepot-bgutilscript"] = {"script_path": [pot_script]}
-        try:
-            with YoutubeDL(opts) as ydl:
-                ydl.extract_info(url, download=False)
-        except Exception as e:
-            logs.append(f"EXC {type(e).__name__}: {str(e)[:200]}")
-        info["pot_debug"] = [l for l in logs if "pot" in l.lower() or "token" in l.lower()][:40]
-
-        # Run the bgutil script directly.
-        if pot_script:
-            try:
-                proc = subprocess.run(
-                    [NODE_PATH or "node", pot_script, "-v", "HBMy-y2wb4I"],
-                    capture_output=True, text=True, timeout=60,
-                )
-                info["pot_script_run"] = {
-                    "returncode": proc.returncode,
-                    "stdout": (proc.stdout or "")[:400],
-                    "stderr": (proc.stderr or "")[:400],
-                }
-            except Exception as e:
-                info["pot_script_run"] = f"{type(e).__name__}: {str(e)[:200]}"
-
-    return jsonify(info)
 
 
 @app.route("/api/health")
