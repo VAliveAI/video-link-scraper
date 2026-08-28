@@ -4,7 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=5" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Scraper" />
   <meta name="theme-color" content="#0b0d12" />
   <title>Video Link Scraper</title>
   <style>
@@ -21,25 +23,28 @@
       --err: #f87171;
       --err-bg: #2a1416;
       --radius: 16px;
+      --bar-h: 0px; /* set by JS to the sticky bar height */
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body { height: 100%; }
+    html { -webkit-text-size-adjust: 100%; }
     body {
       margin: 0;
       background: var(--bg);
       color: var(--text);
       font: 400 16px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
       overscroll-behavior-y: contain;
+      /* Leave room for the fixed action bar so nothing hides behind it. */
       padding:
         max(16px, env(safe-area-inset-top))
         max(16px, env(safe-area-inset-right))
-        max(24px, env(safe-area-inset-bottom))
+        calc(var(--bar-h) + max(20px, env(safe-area-inset-bottom)))
         max(16px, env(safe-area-inset-left));
     }
     .wrap { max-width: 640px; margin: 0 auto; }
 
-    header { margin: 4px 0 20px; }
-    h1 { margin: 0 0 4px; font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+    header { margin: 6px 2px 18px; }
+    h1 { margin: 0 0 4px; font-size: 28px; font-weight: 700; letter-spacing: -0.02em; }
     .sub { margin: 0; color: var(--muted); font-size: 14px; }
 
     .card {
@@ -58,15 +63,18 @@
     .seg input { position: absolute; opacity: 0; pointer-events: none; }
     .seg label {
       display: flex; align-items: center; justify-content: center;
-      min-height: 44px; border-radius: 9px; cursor: pointer;
+      min-height: 46px; border-radius: 9px; cursor: pointer;
       font-size: 15px; font-weight: 600; color: var(--muted);
       transition: background .15s, color .15s;
     }
     .seg input:checked + label { background: var(--accent); color: #fff; }
+    .seg input:focus-visible + label { outline: 2px solid var(--accent-2); outline-offset: 2px; }
 
+    .field { position: relative; }
     textarea {
-      width: 100%; min-height: 96px; resize: vertical;
-      padding: 14px; border-radius: 12px;
+      display: block; width: 100%; min-height: 104px; max-height: 42vh;
+      resize: none; /* auto-grown by JS */
+      padding: 14px 44px 14px 14px; border-radius: 12px;
       background: var(--bg); color: var(--text);
       border: 1px solid var(--border);
       font: inherit; font-size: 16px; /* 16px keeps iOS from zooming on focus */
@@ -75,23 +83,59 @@
     textarea:focus { border-color: var(--accent); }
     textarea::placeholder { color: #5d6577; }
 
-    .actions { display: grid; grid-template-columns: auto 1fr; gap: 8px; margin-top: 12px; }
+    /* Clear (×) inside the field, shown only when there's text */
+    .clear {
+      position: absolute; top: 8px; right: 8px;
+      width: 30px; height: 30px; min-height: 0; padding: 0;
+      display: none; align-items: center; justify-content: center;
+      background: var(--panel-2); color: var(--muted);
+      border-radius: 8px; font-size: 18px; line-height: 1;
+    }
+    body.has-text .clear { display: flex; }
+
+    .hint { margin: 12px 2px 0; font-size: 13px; color: var(--muted); }
+
     button {
       min-height: 50px; padding: 0 20px; border: none; border-radius: 12px;
       font: inherit; font-size: 16px; font-weight: 600; cursor: pointer;
       transition: background .15s, opacity .15s, transform .06s;
     }
-    button:active:not(:disabled) { transform: scale(.985); }
+    button:active:not(:disabled) { transform: scale(.97); }
     button:disabled { opacity: .45; cursor: not-allowed; }
     .btn-primary { background: var(--accent); color: #fff; }
     .btn-primary:hover:not(:disabled) { background: var(--accent-2); }
     .btn-ghost { background: var(--panel-2); color: var(--text); }
 
-    .hint { margin: 10px 2px 0; font-size: 13px; color: var(--muted); }
+    /* Sticky, thumb-reachable action bar */
+    .actionbar {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+      padding:
+        10px
+        max(16px, env(safe-area-inset-right))
+        max(14px, env(safe-area-inset-bottom))
+        max(16px, env(safe-area-inset-left));
+      background: color-mix(in srgb, var(--bg) 82%, transparent);
+      -webkit-backdrop-filter: saturate(160%) blur(18px);
+      backdrop-filter: saturate(160%) blur(18px);
+      border-top: 1px solid var(--border);
+    }
+    .actionbar-inner {
+      max-width: 640px; margin: 0 auto;
+      display: grid; grid-template-columns: auto 1fr; gap: 10px;
+    }
+    .actionbar button { min-height: 54px; border-radius: 14px; }
+    #go { font-weight: 700; }
 
     /* Job list */
     .jobs { margin-top: 18px; display: flex; flex-direction: column; gap: 10px; }
     .jobs:empty { display: none; }
+    .jobs-head {
+      display: none; align-items: center; justify-content: space-between;
+      margin: 22px 2px 4px;
+    }
+    .jobs-head.show { display: flex; }
+    .jobs-head h2 { margin: 0; font-size: 14px; font-weight: 600; color: var(--muted); letter-spacing: .01em; }
+    .jobs-head button { min-height: 40px; padding: 0 14px; font-size: 14px; border-radius: 10px; }
     .job {
       background: var(--panel); border: 1px solid var(--border);
       border-radius: 14px; padding: 14px;
@@ -112,15 +156,16 @@
     .job-sub { margin-top: 2px; font-size: 13px; color: var(--muted);
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .x {
-      flex: none; width: 32px; height: 32px; min-height: 32px; padding: 0;
-      background: transparent; color: var(--muted); font-size: 20px; line-height: 1;
+      flex: none; width: 34px; height: 34px; min-height: 34px; padding: 0;
+      background: transparent; color: var(--muted); font-size: 22px; line-height: 1;
       border-radius: 8px;
     }
     .bar { height: 6px; background: var(--bg); border-radius: 99px; overflow: hidden; margin-top: 12px; }
     .bar > i { display: block; height: 100%; width: 0; background: var(--accent);
       border-radius: 99px; transition: width .3s ease; }
     .job-actions { display: flex; gap: 8px; margin-top: 12px; }
-    .job-actions button { flex: 1; min-height: 46px; }
+    .job-actions:empty { display: none; }
+    .job-actions button { flex: 1; min-height: 48px; }
     .btn-save { background: var(--ok); color: #06240f; }
     .err-msg { margin-top: 10px; font-size: 14px; color: var(--err); }
 
@@ -128,7 +173,11 @@
 
     @media (min-width: 560px) {
       body { padding-top: 32px; }
-      h1 { font-size: 30px; }
+      h1 { font-size: 32px; }
+      .sub { font-size: 15px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
     }
   </style>
 </head>
@@ -147,25 +196,36 @@
         <label for="fmt-audio">Audio · mp3</label>
       </div>
 
-      <textarea id="input" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
-        placeholder="Paste links here — one per line, or a whole blob of text.&#10;&#10;https://instagram.com/reel/…&#10;https://x.com/…/status/…&#10;https://youtube.com/watch?v=…"></textarea>
-
-      <div class="actions">
-        <button type="button" class="btn-ghost" id="paste">Paste</button>
-        <button type="button" class="btn-primary" id="go">Download</button>
+      <div class="field">
+        <textarea id="input" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
+          placeholder="Paste links here — one per line, or a whole blob of text.&#10;&#10;https://instagram.com/reel/…&#10;https://x.com/…/status/…&#10;https://youtube.com/watch?v=…"></textarea>
+        <button type="button" class="clear" id="clear" aria-label="Clear">×</button>
       </div>
+
       <p class="hint" id="hint">Tip: paste as many links as you want — they download in parallel.</p>
     </div>
 
+    <div class="jobs-head" id="jobsHead">
+      <h2 id="jobsCount">Downloads</h2>
+      <button type="button" class="btn-save" id="saveAll" style="display:none">Save all</button>
+    </div>
     <div class="jobs" id="jobs"></div>
 
     <p class="footer">Only download videos you have rights to.</p>
   </div>
 
+  <div class="actionbar">
+    <div class="actionbar-inner">
+      <button type="button" class="btn-ghost" id="paste">Paste</button>
+      <button type="button" class="btn-primary" id="go">Download</button>
+    </div>
+  </div>
+
   <script>
     const $ = (id) => document.getElementById(id);
     const inputEl = $("input"), goBtn = $("go"), pasteBtn = $("paste"),
-          jobsEl = $("jobs"), hintEl = $("hint");
+          clearBtn = $("clear"), jobsEl = $("jobs"), hintEl = $("hint"),
+          jobsHead = $("jobsHead"), jobsCount = $("jobsCount"), saveAllBtn = $("saveAll");
 
     // job_id -> { data, el, blob, objectUrl }
     const tracked = new Map();
@@ -182,6 +242,33 @@
       catch { return u; }
     }
 
+    // ---- Textarea: auto-grow + clear button visibility ------------------
+    function syncInput() {
+      inputEl.style.height = "auto";
+      inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.42) + "px";
+      document.body.classList.toggle("has-text", inputEl.value.trim().length > 0);
+    }
+    inputEl.addEventListener("input", syncInput);
+    clearBtn.onclick = () => { inputEl.value = ""; syncInput(); inputEl.focus(); };
+
+    // ---- Sticky bar height -> body padding, keyboard-aware --------------
+    const barEl = document.querySelector(".actionbar");
+    function syncBar() {
+      document.documentElement.style.setProperty("--bar-h", barEl.offsetHeight + "px");
+    }
+    syncBar();
+    window.addEventListener("resize", syncBar);
+    // Keep the bar sitting above the on-screen keyboard on iOS.
+    if (window.visualViewport) {
+      const vv = window.visualViewport;
+      const lift = () => {
+        const overlap = Math.max(0, window.innerHeight - (vv.height + vv.offsetTop));
+        barEl.style.transform = overlap > 40 ? `translateY(-${overlap}px)` : "";
+      };
+      vv.addEventListener("resize", lift);
+      vv.addEventListener("scroll", lift);
+    }
+
     function statusText(j) {
       switch (j.status) {
         case "queued": return "Queued…";
@@ -191,6 +278,14 @@
         case "error": return "Failed";
         default: return j.status;
       }
+    }
+
+    function updateJobsHeader() {
+      const n = tracked.size;
+      jobsHead.classList.toggle("show", n > 0);
+      jobsCount.textContent = n === 1 ? "1 download" : `${n} downloads`;
+      const readyCount = [...tracked.values()].filter((e) => e.data.status === "done").length;
+      saveAllBtn.style.display = readyCount >= 2 ? "" : "none";
     }
 
     function renderJob(j) {
@@ -244,6 +339,8 @@
           .catch(() => {})
           .finally(() => { entry.fetching = false; });
       }
+
+      updateJobsHeader();
     }
 
     async function handleAction(act, jobId, btn) {
@@ -254,16 +351,25 @@
         if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
         entry.el.remove();
         tracked.delete(jobId);
+        updateJobsHeader();
         return;
       }
       if (act === "retry") {
         const url = entry.data.url;
         entry.el.remove();
         tracked.delete(jobId);
+        updateJobsHeader();
         submit(url);
         return;
       }
       if (act === "save") await saveFile(jobId, btn);
+    }
+
+    async function ensureBlob(entry) {
+      if (entry.blob) return entry.blob;
+      const r = await fetch(entry.data.download_url);
+      entry.blob = await r.blob();
+      return entry.blob;
     }
 
     async function saveFile(jobId, btn) {
@@ -277,8 +383,7 @@
         btn.textContent = "Preparing…";
         btn.disabled = true;
         try {
-          const r = await fetch(j.download_url);
-          entry.blob = await r.blob();
+          await ensureBlob(entry);
         } catch {
           btn.textContent = "Failed — tap to retry";
           btn.disabled = false;
@@ -315,6 +420,45 @@
       setTimeout(() => (btn.textContent = original), 1800);
     }
 
+    // Share every ready file at once where the platform supports it.
+    saveAllBtn.onclick = async () => {
+      const ready = [...tracked.values()].filter((e) => e.data.status === "done");
+      if (!ready.length) return;
+      const original = saveAllBtn.textContent;
+      saveAllBtn.textContent = "Preparing…";
+      saveAllBtn.disabled = true;
+      try {
+        const files = [];
+        for (const e of ready) {
+          try {
+            const blob = await ensureBlob(e);
+            const name = e.data.filename || "video.mp4";
+            const type = name.endsWith(".mp3") ? "audio/mpeg" : "video/mp4";
+            files.push(new File([blob], name, { type }));
+          } catch {}
+        }
+        if (canShareFiles && files.length && navigator.canShare({ files })) {
+          await navigator.share({ files });
+          saveAllBtn.textContent = "Saved ✓";
+        } else {
+          // Fallback: trigger each download in turn.
+          for (const e of ready) {
+            if (!e.objectUrl) e.objectUrl = URL.createObjectURL(e.blob);
+            const a = document.createElement("a");
+            a.href = e.objectUrl; a.download = e.data.filename || "video.mp4";
+            document.body.appendChild(a); a.click(); a.remove();
+            await new Promise((r) => setTimeout(r, 300));
+          }
+          saveAllBtn.textContent = "Saved ✓";
+        }
+      } catch (e) {
+        if (!(e && e.name === "AbortError")) saveAllBtn.textContent = "Try again";
+      } finally {
+        saveAllBtn.disabled = false;
+        setTimeout(() => (saveAllBtn.textContent = original), 1800);
+      }
+    };
+
     function activeIds() {
       return [...tracked.entries()]
         .filter(([, e]) => !["done", "error"].includes(e.data.status))
@@ -336,7 +480,7 @@
 
     async function submit(explicitUrl) {
       const text = explicitUrl || inputEl.value;
-      if (!text.trim()) return;
+      if (!text.trim()) { inputEl.focus(); return; }
 
       const audioOnly = $("fmt-audio").checked;
       goBtn.disabled = true;
@@ -357,7 +501,7 @@
           return;
         }
 
-        if (!explicitUrl) inputEl.value = "";
+        if (!explicitUrl) { inputEl.value = ""; syncInput(); }
         const n = data.jobs.length;
         hintEl.style.color = "";
         hintEl.textContent = data.rejected?.length
@@ -384,6 +528,7 @@
         const text = await navigator.clipboard.readText();
         if (text) {
           inputEl.value = inputEl.value ? `${inputEl.value.trim()}\n${text}` : text;
+          syncInput();
           inputEl.focus();
         }
       } catch {
@@ -396,6 +541,8 @@
     inputEl.addEventListener("keydown", (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit();
     });
+
+    syncInput();
   </script>
 </body>
 </html>
