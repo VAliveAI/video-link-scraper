@@ -58,7 +58,7 @@
     .seg {
       display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
       background: var(--bg); border: 1px solid var(--border);
-      border-radius: 12px; padding: 4px; margin-bottom: 12px;
+      border-radius: 12px; padding: 4px;
     }
     .seg input { position: absolute; opacity: 0; pointer-events: none; }
     .seg label {
@@ -121,9 +121,10 @@
     }
     .actionbar-inner {
       max-width: 640px; margin: 0 auto;
-      display: grid; grid-template-columns: auto 1fr; gap: 10px;
+      display: flex; flex-direction: column; gap: 10px;
     }
-    .actionbar button { min-height: 54px; border-radius: 14px; }
+    .actions-row { display: grid; grid-template-columns: auto 1fr; gap: 10px; }
+    .actions-row button { min-height: 54px; border-radius: 14px; }
     #go { font-weight: 700; }
 
     /* Job list */
@@ -189,13 +190,6 @@
     </header>
 
     <div class="card">
-      <div class="seg" role="radiogroup" aria-label="Download format">
-        <input type="radio" id="fmt-video" name="format" value="video" checked />
-        <label for="fmt-video">Video · mp4</label>
-        <input type="radio" id="fmt-audio" name="format" value="audio" />
-        <label for="fmt-audio">Audio · mp3</label>
-      </div>
-
       <div class="field">
         <textarea id="input" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
           placeholder="Paste links here — one per line, or a whole blob of text.&#10;&#10;https://instagram.com/reel/…&#10;https://x.com/…/status/…&#10;https://youtube.com/watch?v=…"></textarea>
@@ -216,8 +210,16 @@
 
   <div class="actionbar">
     <div class="actionbar-inner">
-      <button type="button" class="btn-ghost" id="paste">Paste</button>
-      <button type="button" class="btn-primary" id="go">Download</button>
+      <div class="seg" role="radiogroup" aria-label="Download format">
+        <input type="radio" id="fmt-video" name="format" value="video" checked />
+        <label for="fmt-video">Video · mp4</label>
+        <input type="radio" id="fmt-audio" name="format" value="audio" />
+        <label for="fmt-audio">Audio · mp3</label>
+      </div>
+      <div class="actions-row">
+        <button type="button" class="btn-ghost" id="paste">Paste</button>
+        <button type="button" class="btn-primary" id="go">Download</button>
+      </div>
     </div>
   </div>
 
