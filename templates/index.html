@@ -251,6 +251,47 @@
     inputEl.addEventListener("input", syncInput);
     clearBtn.onclick = () => { inputEl.value = ""; syncInput(); inputEl.focus(); };
 
+    // ---- Auto-paste: pull a link off the clipboard without a manual tap --
+    function looksLikeLink(t) { return /\bhttps?:\/\/\S+/i.test(t || ""); }
+
+    async function readClipboardLink() {
+      if (!navigator.clipboard || !navigator.clipboard.readText) return "";
+      try {
+        const t = (await navigator.clipboard.readText() || "").trim();
+        return looksLikeLink(t) ? t : "";
+      } catch {
+        // iOS blocks reads outside a user gesture — that's expected, stay quiet.
+        return "";
+      }
+    }
+
+    // Fill the box from the clipboard, but only when it's empty so we never
+    // clobber something the user is mid-editing.
+    async function autoFillFromClipboard() {
+      if (inputEl.value.trim()) return false;
+      const link = await readClipboardLink();
+      if (!link) return false;
+      inputEl.value = link;
+      syncInput();
+      return true;
+    }
+
+    // On open and whenever the app comes back to the foreground (e.g. right
+    // after copying a link in another app), try to prefill automatically.
+    function tryAutoPaste() {
+      autoFillFromClipboard().then((ok) => {
+        if (ok) {
+          hintEl.style.color = "";
+          hintEl.textContent = "Pasted from your clipboard — just tap Download.";
+        }
+      });
+    }
+    tryAutoPaste();
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") tryAutoPaste();
+    });
+    window.addEventListener("focus", tryAutoPaste);
+
     // ---- Sticky bar height -> body padding, keyboard-aware --------------
     const barEl = document.querySelector(".actionbar");
     function syncBar() {
@@ -479,7 +520,13 @@
     }
 
     async function submit(explicitUrl) {
-      const text = explicitUrl || inputEl.value;
+      let text = explicitUrl || inputEl.value;
+      // Empty box + a tap on Download: read the clipboard right here, inside
+      // the user gesture (the one moment iOS allows it), so it's one tap.
+      if (!text.trim() && !explicitUrl) {
+        await autoFillFromClipboard();
+        text = inputEl.value;
+      }
       if (!text.trim()) { inputEl.focus(); return; }
 
       const audioOnly = $("fmt-audio").checked;
