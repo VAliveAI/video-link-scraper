@@ -1,4 +1,12 @@
-.venv
+# Local virtualenv / caches
+.venv/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Machine-local Claude settings
+.claude/settings.local.json
+
+# Never commit cookie exports — these carry live login sessions
+*cookies*.txt
+*.binarycookies

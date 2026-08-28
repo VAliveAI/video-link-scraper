@@ -2,213 +2,399 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=5" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0b0d12" />
   <title>Video Link Scraper</title>
   <style>
     :root {
-      --bg: #0f1115;
-      --panel: #1a1d24;
-      --text: #e8eaed;
-      --muted: #9aa0a6;
+      --bg: #0b0d12;
+      --panel: #151922;
+      --panel-2: #1c2130;
+      --text: #eef1f6;
+      --muted: #949cad;
       --accent: #6366f1;
-      --accent-hover: #4f46e5;
-      --error: #ef4444;
-      --success: #22c55e;
-      --border: #2a2e37;
+      --accent-2: #818cf8;
+      --border: #262c3a;
+      --ok: #22c55e;
+      --err: #f87171;
+      --err-bg: #2a1416;
+      --radius: 16px;
     }
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; }
     body {
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
       background: var(--bg);
       color: var(--text);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
+      font: 400 16px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+      overscroll-behavior-y: contain;
+      padding:
+        max(16px, env(safe-area-inset-top))
+        max(16px, env(safe-area-inset-right))
+        max(24px, env(safe-area-inset-bottom))
+        max(16px, env(safe-area-inset-left));
     }
+    .wrap { max-width: 640px; margin: 0 auto; }
+
+    header { margin: 4px 0 20px; }
+    h1 { margin: 0 0 4px; font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+    .sub { margin: 0; color: var(--muted); font-size: 14px; }
+
     .card {
-      width: 100%;
-      max-width: 560px;
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 32px;
-      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+      border-radius: var(--radius);
+      padding: 16px;
     }
-    h1 {
-      margin: 0 0 8px;
-      font-size: 24px;
-      font-weight: 600;
+
+    /* Segmented format toggle */
+    .seg {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 12px; padding: 4px; margin-bottom: 12px;
     }
-    p.subtitle {
-      margin: 0 0 24px;
-      color: var(--muted);
-      font-size: 14px;
+    .seg input { position: absolute; opacity: 0; pointer-events: none; }
+    .seg label {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 44px; border-radius: 9px; cursor: pointer;
+      font-size: 15px; font-weight: 600; color: var(--muted);
+      transition: background .15s, color .15s;
     }
-    form { display: flex; flex-direction: column; gap: 12px; }
-    .row { display: flex; gap: 8px; }
-    .format-toggle {
-      display: inline-flex;
-      gap: 0;
-      background: #0f1115;
+    .seg input:checked + label { background: var(--accent); color: #fff; }
+
+    textarea {
+      width: 100%; min-height: 96px; resize: vertical;
+      padding: 14px; border-radius: 12px;
+      background: var(--bg); color: var(--text);
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 3px;
-      align-self: flex-start;
+      font: inherit; font-size: 16px; /* 16px keeps iOS from zooming on focus */
+      outline: none; transition: border-color .15s;
     }
-    .format-toggle label {
-      padding: 6px 14px;
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--muted);
-      border-radius: 6px;
-      cursor: pointer;
-      user-select: none;
-      transition: all 0.15s;
-    }
-    .format-toggle input[type="radio"] {
-      position: absolute;
-      opacity: 0;
-      pointer-events: none;
-    }
-    .format-toggle input[type="radio"]:checked + label {
-      background: var(--accent);
-      color: white;
-    }
-    input[type="url"] {
-      flex: 1;
-      padding: 12px 14px;
-      font-size: 14px;
-      background: #0f1115;
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      outline: none;
-      transition: border-color 0.15s;
-    }
-    input[type="url"]:focus { border-color: var(--accent); }
+    textarea:focus { border-color: var(--accent); }
+    textarea::placeholder { color: #5d6577; }
+
+    .actions { display: grid; grid-template-columns: auto 1fr; gap: 8px; margin-top: 12px; }
     button {
-      padding: 12px 20px;
-      font-size: 14px;
-      font-weight: 500;
-      background: var(--accent);
-      color: white;
-      border: none;
+      min-height: 50px; padding: 0 20px; border: none; border-radius: 12px;
+      font: inherit; font-size: 16px; font-weight: 600; cursor: pointer;
+      transition: background .15s, opacity .15s, transform .06s;
+    }
+    button:active:not(:disabled) { transform: scale(.985); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-2); }
+    .btn-ghost { background: var(--panel-2); color: var(--text); }
+
+    .hint { margin: 10px 2px 0; font-size: 13px; color: var(--muted); }
+
+    /* Job list */
+    .jobs { margin-top: 18px; display: flex; flex-direction: column; gap: 10px; }
+    .jobs:empty { display: none; }
+    .job {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 14px; padding: 14px;
+      animation: rise .18s ease-out;
+    }
+    @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
+    .job.err { border-color: #4a2226; background: var(--err-bg); }
+    .job-top { display: flex; align-items: flex-start; gap: 10px; }
+    .badge {
+      flex: none; font-size: 11px; font-weight: 700; letter-spacing: .04em;
+      text-transform: uppercase; padding: 4px 8px; border-radius: 6px;
+      background: var(--panel-2); color: var(--muted);
+    }
+    .job-title {
+      flex: 1; min-width: 0; font-size: 15px; font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .job-sub { margin-top: 2px; font-size: 13px; color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .x {
+      flex: none; width: 32px; height: 32px; min-height: 32px; padding: 0;
+      background: transparent; color: var(--muted); font-size: 20px; line-height: 1;
       border-radius: 8px;
-      cursor: pointer;
-      transition: background 0.15s;
     }
-    button:hover:not(:disabled) { background: var(--accent-hover); }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    .status {
-      margin-top: 20px;
-      padding: 14px 16px;
-      border-radius: 8px;
-      font-size: 14px;
-      display: none;
-    }
-    .status.show { display: block; }
-    .status.pending { background: #1e293b; color: #93c5fd; }
-    .status.done { background: #14532d; color: #bbf7d0; }
-    .status.error { background: #450a0a; color: #fecaca; }
-    .status a {
-      color: inherit;
-      font-weight: 600;
-      text-decoration: underline;
-    }
-    .spinner {
-      display: inline-block;
-      width: 12px;
-      height: 12px;
-      border: 2px solid currentColor;
-      border-right-color: transparent;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-      margin-right: 8px;
-      vertical-align: -2px;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    footer {
-      margin-top: 20px;
-      font-size: 12px;
-      color: var(--muted);
-      text-align: center;
+    .bar { height: 6px; background: var(--bg); border-radius: 99px; overflow: hidden; margin-top: 12px; }
+    .bar > i { display: block; height: 100%; width: 0; background: var(--accent);
+      border-radius: 99px; transition: width .3s ease; }
+    .job-actions { display: flex; gap: 8px; margin-top: 12px; }
+    .job-actions button { flex: 1; min-height: 46px; }
+    .btn-save { background: var(--ok); color: #06240f; }
+    .err-msg { margin-top: 10px; font-size: 14px; color: var(--err); }
+
+    .footer { margin-top: 22px; text-align: center; font-size: 12px; color: #5d6577; }
+
+    @media (min-width: 560px) {
+      body { padding-top: 32px; }
+      h1 { font-size: 30px; }
     }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Video Link Scraper</h1>
-    <p class="subtitle">Paste a YouTube, Pinterest, or Instagram link to download the video.</p>
-    <form id="form">
-      <div class="format-toggle" role="radiogroup" aria-label="Download format">
+  <div class="wrap">
+    <header>
+      <h1>Video Link Scraper</h1>
+      <p class="sub">YouTube · Instagram · X · Pinterest — one link or many.</p>
+    </header>
+
+    <div class="card">
+      <div class="seg" role="radiogroup" aria-label="Download format">
         <input type="radio" id="fmt-video" name="format" value="video" checked />
-        <label for="fmt-video">Video (mp4)</label>
+        <label for="fmt-video">Video · mp4</label>
         <input type="radio" id="fmt-audio" name="format" value="audio" />
-        <label for="fmt-audio">Audio (mp3)</label>
+        <label for="fmt-audio">Audio · mp3</label>
       </div>
-      <div class="row">
-        <input id="url" type="url" placeholder="YouTube, Pinterest, or Instagram URL" required />
-        <button type="submit" id="submit">Download</button>
+
+      <textarea id="input" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
+        placeholder="Paste links here — one per line, or a whole blob of text.&#10;&#10;https://instagram.com/reel/…&#10;https://x.com/…/status/…&#10;https://youtube.com/watch?v=…"></textarea>
+
+      <div class="actions">
+        <button type="button" class="btn-ghost" id="paste">Paste</button>
+        <button type="button" class="btn-primary" id="go">Download</button>
       </div>
-    </form>
-    <div id="status" class="status"></div>
-    <footer>Only download videos you have rights to. Respect each platform's terms of service.</footer>
+      <p class="hint" id="hint">Tip: paste as many links as you want — they download in parallel.</p>
+    </div>
+
+    <div class="jobs" id="jobs"></div>
+
+    <p class="footer">Only download videos you have rights to.</p>
   </div>
 
   <script>
-    const form = document.getElementById("form");
-    const urlInput = document.getElementById("url");
-    const submitBtn = document.getElementById("submit");
-    const statusEl = document.getElementById("status");
+    const $ = (id) => document.getElementById(id);
+    const inputEl = $("input"), goBtn = $("go"), pasteBtn = $("paste"),
+          jobsEl = $("jobs"), hintEl = $("hint");
 
-    function setStatus(kind, html) {
-      statusEl.className = "status show " + kind;
-      statusEl.innerHTML = html;
+    // job_id -> { data, el, blob, objectUrl }
+    const tracked = new Map();
+    let pollTimer = null;
+
+    const canShareFiles = !!(navigator.canShare && navigator.share);
+    const SITE_LABEL = { youtube: "YouTube", instagram: "Instagram", twitter: "X", pinterest: "Pinterest" };
+
+    function esc(s) {
+      return String(s ?? "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+    }
+    function shortUrl(u) {
+      try { const p = new URL(u); return p.hostname.replace(/^www\./, "") + p.pathname; }
+      catch { return u; }
     }
 
-    async function poll(jobId) {
-      const res = await fetch(`/api/status/${jobId}`);
-      const data = await res.json();
-      if (data.status === "pending") {
-        setStatus("pending", `<span class="spinner"></span>Downloading...`);
-        setTimeout(() => poll(jobId), 1500);
-      } else if (data.status === "done") {
-        const safeTitle = (data.title || "video").replace(/[<>&"]/g, c =>
-          ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c])
-        );
-        setStatus("done", `Ready: ${safeTitle} &nbsp; <a href="${data.download_url}">Click to download</a>`);
-        submitBtn.disabled = false;
-      } else {
-        setStatus("error", `Error: ${data.error || "Download failed"}`);
-        submitBtn.disabled = false;
+    function statusText(j) {
+      switch (j.status) {
+        case "queued": return "Queued…";
+        case "downloading": return `Downloading… ${j.progress || 0}%`;
+        case "processing": return "Converting…";
+        case "done": return "Ready";
+        case "error": return "Failed";
+        default: return j.status;
       }
     }
 
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      submitBtn.disabled = true;
-      setStatus("pending", `<span class="spinner"></span>Starting...`);
-      try {
-        const audioOnly = document.getElementById("fmt-audio").checked;
-        const res = await fetch("/api/download", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: urlInput.value, audio_only: audioOnly }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          setStatus("error", `Error: ${data.error || "Request failed"}`);
-          submitBtn.disabled = false;
+    function renderJob(j) {
+      let entry = tracked.get(j.job_id);
+      if (!entry) {
+        const el = document.createElement("div");
+        el.className = "job";
+        jobsEl.prepend(el);
+        entry = { data: j, el, blob: null, objectUrl: null };
+        tracked.set(j.job_id, entry);
+      }
+      entry.data = j;
+      const el = entry.el;
+      el.classList.toggle("err", j.status === "error");
+
+      const done = j.status === "done";
+      const label = SITE_LABEL[j.site] || "Link";
+      const title = j.title || shortUrl(j.url);
+
+      el.innerHTML = `
+        <div class="job-top">
+          <span class="badge">${esc(label)}</span>
+          <div style="flex:1;min-width:0">
+            <div class="job-title">${esc(title)}</div>
+            <div class="job-sub">${esc(done ? (j.filename || "") : statusText(j))}</div>
+          </div>
+          <button class="x" data-act="dismiss" aria-label="Remove">×</button>
+        </div>
+        ${!done && j.status !== "error"
+          ? `<div class="bar"><i style="width:${j.status === "processing" ? 99 : (j.progress || 0)}%"></i></div>`
+          : ""}
+        ${j.status === "error" ? `<div class="err-msg">${esc(j.error || "Something went wrong")}</div>` : ""}
+        <div class="job-actions">
+          ${done ? `<button class="btn-save" data-act="save">${canShareFiles ? "Save / Share" : "Save"}</button>` : ""}
+          ${j.status === "error" ? `<button class="btn-ghost" data-act="retry">Retry</button>` : ""}
+        </div>
+      `;
+
+      el.querySelectorAll("[data-act]").forEach((btn) => {
+        btn.onclick = () => handleAction(btn.dataset.act, j.job_id, btn);
+      });
+
+      // Pre-fetch the file as soon as it's ready. Doing it now (rather than on
+      // tap) keeps the later share() call inside the user-gesture window,
+      // which iOS requires.
+      if (done && !entry.blob && !entry.fetching) {
+        entry.fetching = true;
+        fetch(j.download_url)
+          .then((r) => (r.ok ? r.blob() : null))
+          .then((b) => { entry.blob = b; })
+          .catch(() => {})
+          .finally(() => { entry.fetching = false; });
+      }
+    }
+
+    async function handleAction(act, jobId, btn) {
+      const entry = tracked.get(jobId);
+      if (!entry) return;
+
+      if (act === "dismiss") {
+        if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
+        entry.el.remove();
+        tracked.delete(jobId);
+        return;
+      }
+      if (act === "retry") {
+        const url = entry.data.url;
+        entry.el.remove();
+        tracked.delete(jobId);
+        submit(url);
+        return;
+      }
+      if (act === "save") await saveFile(jobId, btn);
+    }
+
+    async function saveFile(jobId, btn) {
+      const entry = tracked.get(jobId);
+      const j = entry.data;
+      const name = j.filename || "video.mp4";
+      const original = btn.textContent;
+
+      // Blob may still be downloading from our own server — wait briefly.
+      if (!entry.blob) {
+        btn.textContent = "Preparing…";
+        btn.disabled = true;
+        try {
+          const r = await fetch(j.download_url);
+          entry.blob = await r.blob();
+        } catch {
+          btn.textContent = "Failed — tap to retry";
+          btn.disabled = false;
           return;
         }
-        poll(data.job_id);
-      } catch (err) {
-        setStatus("error", `Error: ${err.message}`);
-        submitBtn.disabled = false;
+        btn.disabled = false;
+        btn.textContent = original;
       }
+
+      const type = name.endsWith(".mp3") ? "audio/mpeg" : "video/mp4";
+      const file = new File([entry.blob], name, { type });
+
+      // Native share sheet (iOS: "Save Video" → Photos) keeps us on the page.
+      if (canShareFiles && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file] });
+          btn.textContent = "Saved ✓";
+          setTimeout(() => (btn.textContent = original), 1800);
+          return;
+        } catch (e) {
+          if (e && e.name === "AbortError") return; // user dismissed the sheet
+        }
+      }
+
+      // Fallback: blob download. Never points at /api/file, so the page stays put.
+      if (!entry.objectUrl) entry.objectUrl = URL.createObjectURL(entry.blob);
+      const a = document.createElement("a");
+      a.href = entry.objectUrl;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      btn.textContent = "Saved ✓";
+      setTimeout(() => (btn.textContent = original), 1800);
+    }
+
+    function activeIds() {
+      return [...tracked.entries()]
+        .filter(([, e]) => !["done", "error"].includes(e.data.status))
+        .map(([id]) => id);
+    }
+
+    function schedulePoll() {
+      if (pollTimer) return;
+      pollTimer = setInterval(async () => {
+        const ids = activeIds();
+        if (!ids.length) { clearInterval(pollTimer); pollTimer = null; return; }
+        try {
+          const res = await fetch(`/api/status?ids=${ids.join(",")}`);
+          const { jobs } = await res.json();
+          Object.values(jobs || {}).forEach(renderJob);
+        } catch {}
+      }, 1200);
+    }
+
+    async function submit(explicitUrl) {
+      const text = explicitUrl || inputEl.value;
+      if (!text.trim()) return;
+
+      const audioOnly = $("fmt-audio").checked;
+      goBtn.disabled = true;
+      const originalLabel = goBtn.textContent;
+      goBtn.textContent = "Starting…";
+
+      try {
+        const res = await fetch("/api/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, audio_only: audioOnly }),
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          hintEl.textContent = data.error || "Request failed";
+          hintEl.style.color = "var(--err)";
+          return;
+        }
+
+        if (!explicitUrl) inputEl.value = "";
+        const n = data.jobs.length;
+        hintEl.style.color = "";
+        hintEl.textContent = data.rejected?.length
+          ? `Started ${n} — skipped ${data.rejected.length} unsupported link(s).`
+          : `Started ${n} download${n > 1 ? "s" : ""}.`;
+
+        data.jobs.forEach(({ job_id, url }) =>
+          renderJob({ job_id, url, status: "queued", progress: 0, title: "", site: null, filename: null })
+        );
+        schedulePoll();
+      } catch (e) {
+        hintEl.textContent = `Error: ${e.message}`;
+        hintEl.style.color = "var(--err)";
+      } finally {
+        goBtn.disabled = false;
+        goBtn.textContent = originalLabel;
+      }
+    }
+
+    goBtn.onclick = () => submit();
+
+    pasteBtn.onclick = async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          inputEl.value = inputEl.value ? `${inputEl.value.trim()}\n${text}` : text;
+          inputEl.focus();
+        }
+      } catch {
+        inputEl.focus();
+        hintEl.textContent = "Clipboard blocked — long-press the box and choose Paste.";
+      }
+    };
+
+    // Cmd/Ctrl+Enter submits from the textarea.
+    inputEl.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit();
     });
   </script>
 </body>

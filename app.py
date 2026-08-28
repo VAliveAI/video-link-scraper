@@ -1,277 +1,457 @@
 from __future__ import annotations
 
+import base64
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
 
-from flask import Flask, jsonify, render_template, request, send_file, abort
+from flask import Flask, abort, jsonify, render_template, request, send_file
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-# Browsers to try for cookie extraction, in order. YouTube increasingly requires
-# authenticated requests (PO tokens / SABR). Pulling cookies from a logged-in
-# browser is the most reliable workaround.
-COOKIE_BROWSERS = ("chrome", "brave", "edge", "firefox", "chromium", "arc")
+APP_VERSION = "2026.08.27-batch"
+
+app = Flask(__name__)
+
+DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "video_scraper_downloads"
+try:
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:  # pragma: no cover - startup must never die on this
+    pass
+
+# Cap simultaneous downloads. Each job can spawn ffmpeg (merge + possible
+# transcode), so unbounded parallelism from a big batch paste would thrash a
+# small container. Requests beyond the cap queue up as "queued" jobs.
+MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "3"))
+_download_slots = threading.BoundedSemaphore(MAX_CONCURRENT_DOWNLOADS)
+
+# Jobs older than this are swept (files deleted, entry dropped).
+JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", str(6 * 60 * 60)))
+
+MAX_BATCH_URLS = 25
+
+# job_id -> dict (see _new_job)
+jobs: dict[str, dict] = {}
+jobs_lock = threading.Lock()
 
 
-def _pick_cookie_browser() -> Optional[str]:
-    candidates = {
-        "chrome": "~/Library/Application Support/Google/Chrome",
-        "brave": "~/Library/Application Support/BraveSoftware/Brave-Browser",
-        "edge": "~/Library/Application Support/Microsoft Edge",
-        "firefox": "~/Library/Application Support/Firefox",
-        "chromium": "~/Library/Application Support/Chromium",
-        "arc": "~/Library/Application Support/Arc",
-    }
-    for name in COOKIE_BROWSERS:
-        if Path(os.path.expanduser(candidates[name])).exists():
+# ---------------------------------------------------------------------------
+# URL matching
+# ---------------------------------------------------------------------------
+
+SITE_PATTERNS = {
+    "youtube": r"(youtube\.com|youtu\.be|youtube-nocookie\.com)",
+    "pinterest": r"(pinterest\.[a-z.]+|pin\.it)",
+    "instagram": r"(instagram\.com|instagr\.am|ddinstagram\.com)",
+    "twitter": r"(twitter\.com|x\.com|fxtwitter\.com|vxtwitter\.com|t\.co)",
+}
+
+SITE_RES = {
+    name: re.compile(rf"^(https?://)?([\w-]+\.)*{pattern}(/|$)", re.IGNORECASE)
+    for name, pattern in SITE_PATTERNS.items()
+}
+
+
+def site_for_url(url: str) -> Optional[str]:
+    url = url.strip()
+    for name, rx in SITE_RES.items():
+        if rx.match(url):
             return name
     return None
 
 
-def _find_browser_with_instagram_session() -> Optional[tuple]:
-    """Find a browser (Chromium-family or Safari) that's logged into Instagram.
+def is_allowed_url(url: str) -> bool:
+    return site_for_url(url) is not None
 
-    Returns a tuple usable as yt-dlp's `cookiesfrombrowser` — either
-    (browser, profile_dir) for Chromium browsers or (browser,) for Safari —
-    or None if no logged-in session is found.
+
+def extract_urls(blob: str) -> list[str]:
+    """Pull every http(s) URL out of a pasted blob.
+
+    Handles newline-separated lists, space-separated, and links embedded in
+    share text like "Check this out https://x.com/... via @someone".
     """
-    import sqlite3
-    import shutil
-    import subprocess
+    found = re.findall(r"https?://[^\s<>\"']+", blob or "")
+    cleaned = []
+    seen = set()
+    for u in found:
+        u = u.rstrip(".,);]!")
+        if u not in seen:
+            seen.add(u)
+            cleaned.append(u)
+    return cleaned
 
-    chromium_roots = {
-        "chrome": "~/Library/Application Support/Google/Chrome",
-        "brave": "~/Library/Application Support/BraveSoftware/Brave-Browser",
-        "edge": "~/Library/Application Support/Microsoft Edge",
-        "chromium": "~/Library/Application Support/Chromium",
-    }
-    for browser, root in chromium_roots.items():
+
+# ---------------------------------------------------------------------------
+# Cookies
+# ---------------------------------------------------------------------------
+
+# Sites that generally require a logged-in session. Each maps to the env var
+# prefix used to supply cookies in a deployed environment.
+COOKIE_SITES = {"instagram": "IG", "twitter": "X", "youtube": "YT"}
+
+# Cookie name that proves an actual logged-in session for each site.
+SESSION_COOKIE = {"instagram": "sessionid", "twitter": "auth_token", "youtube": "SID"}
+
+CHROMIUM_ROOTS = {
+    "chrome": "~/Library/Application Support/Google/Chrome",
+    "brave": "~/Library/Application Support/BraveSoftware/Brave-Browser",
+    "edge": "~/Library/Application Support/Microsoft Edge",
+    "chromium": "~/Library/Application Support/Chromium",
+}
+
+
+def _cookies_from_env(site: str) -> Optional[str]:
+    """Materialize cookies supplied via env var into a file yt-dlp can read.
+
+    Base64 is preferred because Netscape cookie files are tab-separated and
+    multi-line, which most env-var UIs mangle.
+    """
+    prefix = COOKIE_SITES.get(site)
+    if not prefix:
+        return None
+
+    for var, is_b64 in ((f"{prefix}_COOKIES_B64", True), (f"{prefix}_COOKIES_TXT", False)):
+        raw = os.environ.get(var)
+        if not raw:
+            continue
+        try:
+            text = base64.b64decode(raw).decode("utf-8") if is_b64 else raw
+        except Exception:
+            continue
+        if SESSION_COOKIE.get(site, "") not in text:
+            # Present but not actually a logged-in export — keep looking.
+            continue
+        path = DOWNLOAD_DIR / f"{site}_cookies.txt"
+        path.write_text(text)
+        return str(path)
+
+    file_var = os.environ.get(f"{prefix}_COOKIES_FILE")
+    if file_var and Path(file_var).exists():
+        return file_var
+    return None
+
+
+def _browser_with_session(site: str) -> Optional[tuple]:
+    """Find a local browser profile holding a real logged-in session for `site`.
+
+    Only useful in local dev — a deployed container has no browsers. Returns a
+    tuple shaped for yt-dlp's `cookiesfrombrowser` option, or None.
+    """
+    import sqlite3  # local-dev only; kept lazy so slim images still boot
+
+    cookie_name = SESSION_COOKIE.get(site)
+    host_like = {"instagram": "%instagram%", "twitter": "%twitter%"}.get(site)
+    if not cookie_name or not host_like:
+        return None
+
+    for browser, root in CHROMIUM_ROOTS.items():
         root_path = Path(os.path.expanduser(root))
         if not root_path.exists():
             continue
         for profile_dir in sorted(root_path.iterdir()):
             if not profile_dir.is_dir():
                 continue
-            if profile_dir.name not in ("Default",) and not profile_dir.name.startswith("Profile "):
+            if profile_dir.name != "Default" and not profile_dir.name.startswith("Profile "):
                 continue
             cookies_db = profile_dir / "Cookies"
             if not cookies_db.exists():
                 continue
+            tmp_db = Path(tempfile.gettempdir()) / f"cookie_probe_{os.getpid()}_{threading.get_ident()}.db"
             try:
-                tmp_db = Path(tempfile.gettempdir()) / f"yt_cookie_probe_{os.getpid()}.db"
                 shutil.copy(cookies_db, tmp_db)
                 with sqlite3.connect(tmp_db) as conn:
                     cur = conn.execute(
-                        "SELECT COUNT(*) FROM cookies WHERE host_key LIKE '%instagram%' AND name='sessionid'"
+                        "SELECT COUNT(*) FROM cookies WHERE host_key LIKE ? AND name = ?",
+                        (host_like, cookie_name),
                     )
                     if cur.fetchone()[0] > 0:
                         return (browser, profile_dir.name)
             except Exception:
                 continue
             finally:
-                try:
-                    tmp_db.unlink()
-                except Exception:
-                    pass
+                tmp_db.unlink(missing_ok=True)
 
-    # Safari uses a proprietary binary cookie format, so we can't sqlite-probe.
-    # Probe by asking yt-dlp to export Safari cookies to a temp Netscape file
-    # and grep for sessionid. Safari's cookie file is also TCC-protected;
-    # this returns nothing gracefully if Python lacks Full Disk Access.
-    safari_cookies = Path.home() / "Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies"
-    if safari_cookies.exists():
-        probe_file = Path(tempfile.gettempdir()) / f"safari_probe_{os.getpid()}.txt"
+    # Safari stores cookies in a binary format we can't probe with sqlite, so
+    # ask yt-dlp to export them and look for the session cookie in the result.
+    safari_db = Path.home() / "Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies"
+    if safari_db.exists():
+        probe = Path(tempfile.gettempdir()) / f"safari_probe_{os.getpid()}_{threading.get_ident()}.txt"
         try:
             subprocess.run(
-                [
-                    sys.executable, "-m", "yt_dlp",
-                    "--cookies-from-browser", "safari",
-                    "--cookies", str(probe_file),
-                    "--skip-download",
-                    "https://example.com/",
-                ],
-                capture_output=True, timeout=15,
+                [sys.executable, "-m", "yt_dlp", "--cookies-from-browser", "safari",
+                 "--cookies", str(probe), "--skip-download", "https://example.com/"],
+                capture_output=True, timeout=20,
             )
-            if probe_file.exists():
-                content = probe_file.read_text(errors="ignore")
-                if "instagram" in content.lower() and "sessionid" in content.lower():
-                    return ("safari",)
+            if probe.exists() and cookie_name in probe.read_text(errors="ignore"):
+                return ("safari",)
         except Exception:
             pass
         finally:
-            try:
-                probe_file.unlink()
-            except Exception:
-                pass
-
+            probe.unlink(missing_ok=True)
     return None
 
-app = Flask(__name__)
 
-DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "video_scraper_downloads"
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+def apply_cookies(ydl_opts: dict, site: str) -> None:
+    """Attach cookies to yt-dlp options if this site needs (and has) them."""
+    if site not in COOKIE_SITES:
+        return
 
-# job_id -> {"status": "pending|done|error", "file": Path|None, "title": str, "error": str|None}
-jobs: dict[str, dict] = {}
-jobs_lock = threading.Lock()
+    from_env = _cookies_from_env(site)
+    if from_env:
+        ydl_opts["cookiefile"] = from_env
+        return
 
-ALLOWED_HOSTS = re.compile(
-    r"^(https?://)?([\w-]+\.)*("
-    r"youtube\.com|youtu\.be|"
-    r"pinterest\.com|pin\.it|pinterest\.[a-z.]+|"
-    r"instagram\.com|instagr\.am"
-    r")(/|$)",
-    re.IGNORECASE,
-)
+    if site == "youtube":
+        # Strictly opt-in via YT_COOKIES_*. Never auto-detect from a browser:
+        # unsolicited cookies push YouTube down a more restrictive path that
+        # yields "format not available" even when it would otherwise work.
+        return
 
-INSTAGRAM_RE = re.compile(r"^(https?://)?([\w-]+\.)*(instagram\.com|instagr\.am)/", re.IGNORECASE)
-
-YOUTUBE_RE = re.compile(r"^(https?://)?([\w-]+\.)*(youtube\.com|youtu\.be)(/|$)", re.IGNORECASE)
-
-
-def is_allowed_url(url: str) -> bool:
-    return bool(ALLOWED_HOSTS.match(url.strip()))
+    from_browser = _browser_with_session(site)
+    if from_browser:
+        ydl_opts["cookiesfrombrowser"] = from_browser
 
 
-def is_instagram_url(url: str) -> bool:
-    return bool(INSTAGRAM_RE.match(url.strip()))
+# ---------------------------------------------------------------------------
+# Media helpers
+# ---------------------------------------------------------------------------
+
+def _probe_codec(path: Path, stream: str) -> str:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", stream,
+             "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return out.stdout.strip().lower().splitlines()[0] if out.stdout.strip() else ""
+    except Exception:
+        return ""
 
 
-def is_youtube_url(url: str) -> bool:
-    return bool(YOUTUBE_RE.match(url.strip()))
+def ensure_quicktime_compatible(path: Path) -> Path:
+    """Transcode to H.264 + AAC when needed so the file plays in QuickTime/Photos.
+
+    Instagram and YouTube often serve VP9/AV1/Opus, which play fine in
+    Chrome/Safari/VLC but not in QuickTime or the iOS Photos app.
+    """
+    video_codec = _probe_codec(path, "v:0")
+    audio_codec = _probe_codec(path, "a:0")
+
+    if video_codec in ("h264", "avc1") and audio_codec in ("aac", "mp4a", ""):
+        return path
+
+    out_path = path.with_name(path.stem + "__qt.mp4")
+    audio_flag = ["-c:a", "copy"] if audio_codec in ("aac", "mp4a") else ["-c:a", "aac", "-b:a", "192k"]
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(path),
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+             "-pix_fmt", "yuv420p", *audio_flag, "-movflags", "+faststart",
+             str(out_path)],
+            check=True, capture_output=True, timeout=900,
+        )
+    except Exception:
+        out_path.unlink(missing_ok=True)
+        return path
+
+    if out_path.exists() and out_path.stat().st_size > 0:
+        final = path.with_suffix(".mp4")
+        path.unlink(missing_ok=True)
+        out_path.replace(final)
+        return final
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Jobs
+# ---------------------------------------------------------------------------
+
+def _new_job(url: str, audio_only: bool) -> dict:
+    return {
+        "status": "queued",       # queued | downloading | processing | done | error
+        "progress": 0,
+        "file": None,
+        "title": "",
+        "error": None,
+        "url": url,
+        "audio_only": audio_only,
+        "site": site_for_url(url),
+        "created": time.time(),
+    }
+
+
+def _update(job_id: str, **fields) -> None:
+    with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id].update(fields)
+
+
+def _public_job(job_id: str, job: dict) -> dict:
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "progress": job["progress"],
+        "title": job["title"],
+        "error": job["error"],
+        "url": job["url"],
+        "site": job["site"],
+        "audio_only": job["audio_only"],
+        "filename": job["file"].name if job.get("file") else None,
+        "download_url": f"/api/file/{job_id}" if job["status"] == "done" else None,
+    }
+
+
+def sweep_old_jobs() -> None:
+    cutoff = time.time() - JOB_TTL_SECONDS
+    with jobs_lock:
+        stale = [jid for jid, j in jobs.items() if j["created"] < cutoff]
+        for jid in stale:
+            jobs.pop(jid, None)
+    for jid in stale:
+        shutil.rmtree(DOWNLOAD_DIR / jid, ignore_errors=True)
 
 
 def download_video(job_id: str, url: str, audio_only: bool = False) -> None:
+    site = site_for_url(url)
     job_dir = DOWNLOAD_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # Path to the bgutil-pot script (generates Proof-of-Origin tokens that
-    # YouTube now requires for most videos). Look in the Docker location
-    # first, then fall back to the local-dev install in ~/.
-    pot_script_candidates = [
-        Path(os.environ.get("BGUTIL_POT_HOME", "/opt/bgutil-pot")) / "server/build/generate_once.js",
-        Path.home() / "bgutil-pot/server/build/generate_once.js",
-    ]
-    pot_script = next((p for p in pot_script_candidates if p.exists()), pot_script_candidates[-1])
+    with _download_slots:
+        _update(job_id, status="downloading")
 
-    ydl_opts = {
-        "outtmpl": str(job_dir / "%(title).200B [%(id)s].%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "restrictfilenames": True,
-        "retries": 30,
-        "fragment_retries": 30,
-        "extractor_retries": 5,
-        "concurrent_fragment_downloads": 4,
-        "extractor_args": {},
-    }
+        def progress_hook(d: dict) -> None:
+            if d.get("status") == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                done = d.get("downloaded_bytes") or 0
+                if total:
+                    _update(job_id, progress=min(99, int(done * 100 / total)))
+            elif d.get("status") == "finished":
+                _update(job_id, progress=99, status="processing")
 
-    if audio_only:
-        # Pull best audio stream and re-encode to mp3 via ffmpeg.
-        ydl_opts.update({
-            "format": "bestaudio/best",
-            "postprocessors": [
-                {
+        # bgutil-pot mints the Proof-of-Origin tokens YouTube now requires.
+        pot_script = next(
+            (p for p in (
+                Path(os.environ.get("BGUTIL_POT_HOME", "/opt/bgutil-pot")) / "server/build/generate_once.js",
+                Path.home() / "bgutil-pot/server/build/generate_once.js",
+            ) if p.exists()),
+            None,
+        )
+
+        ydl_opts = {
+            "outtmpl": str(job_dir / "%(title).150B [%(id)s].%(ext)s"),
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "restrictfilenames": True,
+            "retries": 20,
+            "fragment_retries": 20,
+            "extractor_retries": 3,
+            "concurrent_fragment_downloads": 4,
+            "progress_hooks": [progress_hook],
+            "extractor_args": {},
+        }
+
+        if pot_script:
+            ydl_opts["extractor_args"]["youtubepot-bgutilscript"] = {"script_path": [str(pot_script)]}
+
+        if audio_only:
+            ydl_opts.update({
+                "format": "bestaudio/best",
+                "postprocessors": [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
                     "preferredquality": "192",
-                }
-            ],
-        })
-    else:
-        # Fallback chain: best video+audio merge, then best single stream, then anything.
-        ydl_opts.update({
-            "format": "bv*+ba/b/best",
-            "merge_output_format": "mp4",
-        })
-
-    # Wire up bgutil-pot so YouTube actually serves us video data. With this
-    # the default player_client selection works on its own — adding cookies
-    # or custom user-agents tends to push YouTube down a more restrictive
-    # path that yields "format not available" errors.
-    if pot_script.exists():
-        ydl_opts["extractor_args"]["youtubepot-bgutilscript"] = {
-            "script_path": [str(pot_script)],
-        }
-
-    # Instagram blocks most reels/posts unless the request carries a logged-in
-    # session. Pull cookies from a browser profile that's actually logged in
-    # (we scan profiles for a real `sessionid` cookie rather than guessing).
-    # (We skip cookies for YouTube because they make YouTube *more*
-    # restrictive — see comment above.)
-    if is_instagram_url(url):
-        cookie_file = os.environ.get("IG_COOKIES_FILE")
-        if cookie_file and Path(cookie_file).exists():
-            ydl_opts["cookiefile"] = cookie_file
+                }],
+            })
         else:
-            match = _find_browser_with_instagram_session()
-            if match:
-                ydl_opts["cookiesfrombrowser"] = match
-    # YouTube gates some videos (e.g. licensed "- Topic" tracks) behind a
-    # "sign in to confirm you're not a bot" check that the PO token alone can't
-    # satisfy from a datacenter IP. This is opt-in: only when YT_COOKIES_FILE is
-    # set do we attach a logged-in cookies file for YouTube. Left unset, YouTube
-    # behaves as before (PO token only), avoiding the over-restriction noted above.
-    elif is_youtube_url(url):
-        yt_cookie_file = os.environ.get("YT_COOKIES_FILE")
-        if yt_cookie_file and Path(yt_cookie_file).exists():
-            ydl_opts["cookiefile"] = yt_cookie_file
+            # Prefer H.264+AAC so no transcode is needed; fall back to best.
+            ydl_opts.update({
+                "format": (
+                    "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/"
+                    "bv*[vcodec^=avc1]+ba/b[vcodec^=avc1]/bv*+ba/b/best"
+                ),
+                "merge_output_format": "mp4",
+            })
 
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if "entries" in info:
-                info = info["entries"][0]
-            filename = Path(ydl.prepare_filename(info))
-            # Post-processing (audio extraction, mp4 merge) rewrites the
-            # extension, so the prepared filename may no longer exist.
-            # Resolve by finding the actual file on disk, preferring the
-            # expected extension for the chosen mode.
-            preferred_ext = ".mp3" if audio_only else ".mp4"
-            if not filename.exists() or filename.suffix != preferred_ext:
-                vid_id = info.get("id", "")
-                # First try exact match on preferred extension.
-                preferred = [p for p in job_dir.glob(f"*{vid_id}*") if p.suffix == preferred_ext]
-                if preferred:
-                    filename = preferred[0]
-                else:
-                    candidates = [p for p in job_dir.glob(f"*{vid_id}*") if p.is_file()]
-                    if candidates:
-                        # Pick the largest — that's the final merged/encoded output.
-                        filename = max(candidates, key=lambda p: p.stat().st_size)
+        apply_cookies(ydl_opts, site)
 
-            with jobs_lock:
-                jobs[job_id] = {
-                    "status": "done",
-                    "file": filename,
-                    "title": info.get("title", filename.name),
-                    "error": None,
-                }
-    except DownloadError as e:
-        msg = str(e)
-        if "Instagram sent an empty media response" in msg:
-            msg = (
-                "Instagram requires a logged-in session and none was found. "
-                "Log into instagram.com in Chrome (any profile), then retry. "
-                "If you're already logged in, refresh the page once and try again."
-            )
-        with jobs_lock:
-            jobs[job_id] = {"status": "error", "file": None, "title": "", "error": msg}
-    except Exception as e:
-        with jobs_lock:
-            jobs[job_id] = {"status": "error", "file": None, "title": "", "error": f"Unexpected error: {e}"}
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if "entries" in info:
+                    info = info["entries"][0]
 
+                filename = Path(ydl.prepare_filename(info))
+                # Post-processing rewrites extensions, so resolve what's on disk.
+                preferred_ext = ".mp3" if audio_only else ".mp4"
+                if not filename.exists() or filename.suffix != preferred_ext:
+                    vid_id = info.get("id", "")
+                    matches = [p for p in job_dir.glob(f"*{vid_id}*") if p.is_file()]
+                    preferred = [p for p in matches if p.suffix == preferred_ext]
+                    if preferred:
+                        filename = preferred[0]
+                    elif matches:
+                        filename = max(matches, key=lambda p: p.stat().st_size)
+
+                if not audio_only and filename.exists():
+                    _update(job_id, status="processing", progress=99)
+                    filename = ensure_quicktime_compatible(filename)
+
+                _update(
+                    job_id,
+                    status="done",
+                    progress=100,
+                    file=filename,
+                    title=info.get("title") or filename.stem,
+                )
+        except DownloadError as e:
+            _update(job_id, status="error", error=_friendly_error(str(e), site))
+        except Exception as e:
+            _update(job_id, status="error", error=f"Unexpected error: {e}")
+
+
+def _friendly_error(msg: str, site: Optional[str]) -> str:
+    if "Instagram sent an empty media response" in msg or "login required" in msg.lower():
+        if site == "instagram":
+            return ("Instagram needs a logged-in session. The saved cookies may have "
+                    "expired — refresh them and try again.")
+        if site == "twitter":
+            return ("X/Twitter needs a logged-in session for this post. Add X cookies "
+                    "and try again.")
+    if "confirm you" in msg and "not a bot" in msg:
+        return ("YouTube is blocking this server's IP. Add YouTube cookies "
+                "(YT_COOKIES_B64) to get past the bot check.")
+    if "No video could be found" in msg:
+        return "No video found at that link — it may be an image-only post."
+    if "Private" in msg or "not available" in msg:
+        return "That post is private or unavailable."
+    # Strip yt-dlp's noisy suffixes for anything else.
+    return msg.split("; please report")[0].split(". Check if")[0].strip()
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+def _start_job(url: str, audio_only: bool) -> str:
+    job_id = uuid.uuid4().hex
+    with jobs_lock:
+        jobs[job_id] = _new_job(url, audio_only)
+    threading.Thread(target=download_video, args=(job_id, url, audio_only), daemon=True).start()
+    return job_id
 
 
 @app.route("/api/download", methods=["POST"])
@@ -283,32 +463,65 @@ def start_download():
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not is_allowed_url(url):
-        return jsonify({"error": "Only YouTube and Pinterest links are supported"}), 400
+        return jsonify({"error": "Only YouTube, Pinterest, Instagram, and X links are supported"}), 400
 
-    job_id = uuid.uuid4().hex
+    sweep_old_jobs()
+    return jsonify({"job_id": _start_job(url, audio_only)})
+
+
+@app.route("/api/batch", methods=["POST"])
+def start_batch():
+    """Accept a pasted blob or a list of URLs and start one job per link."""
+    data = request.get_json(silent=True) or {}
+    audio_only = bool(data.get("audio_only"))
+
+    raw = data.get("urls")
+    if isinstance(raw, list):
+        candidates = [str(u).strip() for u in raw if str(u).strip()]
+    else:
+        candidates = extract_urls(data.get("text") or data.get("url") or "")
+
+    if not candidates:
+        return jsonify({"error": "No links found in what you pasted"}), 400
+    if len(candidates) > MAX_BATCH_URLS:
+        return jsonify({"error": f"Too many links — max {MAX_BATCH_URLS} at once"}), 400
+
+    sweep_old_jobs()
+
+    started, rejected = [], []
+    for url in candidates:
+        if is_allowed_url(url):
+            started.append({"url": url, "job_id": _start_job(url, audio_only)})
+        else:
+            rejected.append({"url": url, "error": "Unsupported site"})
+
+    if not started:
+        return jsonify({"error": "None of those links are from a supported site", "rejected": rejected}), 400
+    return jsonify({"jobs": started, "rejected": rejected})
+
+
+@app.route("/api/status")
+def status_many():
+    """Poll several jobs at once — one request per tick instead of N."""
+    ids = [i for i in (request.args.get("ids") or "").split(",") if i]
+    if not ids:
+        return jsonify({"error": "No ids provided"}), 400
+    out = {}
     with jobs_lock:
-        jobs[job_id] = {"status": "pending", "file": None, "title": "", "error": None}
-
-    threading.Thread(
-        target=download_video, args=(job_id, url, audio_only), daemon=True
-    ).start()
-    return jsonify({"job_id": job_id})
+        for jid in ids:
+            job = jobs.get(jid)
+            if job:
+                out[jid] = _public_job(jid, job)
+    return jsonify({"jobs": out})
 
 
 @app.route("/api/status/<job_id>")
-def status(job_id: str):
+def status_one(job_id: str):
     with jobs_lock:
         job = jobs.get(job_id)
     if not job:
         return jsonify({"error": "Unknown job"}), 404
-    return jsonify(
-        {
-            "status": job["status"],
-            "title": job["title"],
-            "error": job["error"],
-            "download_url": f"/api/file/{job_id}" if job["status"] == "done" else None,
-        }
-    )
+    return jsonify(_public_job(job_id, job))
 
 
 @app.route("/api/file/<job_id>")
@@ -323,8 +536,15 @@ def get_file(job_id: str):
     return send_file(path, as_attachment=True, download_name=path.name)
 
 
+@app.route("/api/health")
+def health():
+    with jobs_lock:
+        active = sum(1 for j in jobs.values() if j["status"] in ("queued", "downloading", "processing"))
+        total = len(jobs)
+    return jsonify({"ok": True, "version": APP_VERSION, "jobs": total, "active": active})
+
+
 if __name__ == "__main__":
-    # In production (Railway/Docker), bind 0.0.0.0 and honor $PORT.
     host = "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1"
     port = int(os.environ.get("PORT", "8000"))
-    app.run(host=host, port=port, debug=False)
+    app.run(host=host, port=port, debug=False, threaded=True)

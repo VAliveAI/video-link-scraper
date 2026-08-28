@@ -36,10 +36,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Extractors rot fast; pull the newest nightly on top of the stable pin.
+# Best-effort: never fail the build if the nightly channel is unavailable.
+RUN pip install --no-cache-dir --pre --upgrade "yt-dlp[default]" || true
+
 COPY . .
 
 EXPOSE 8000
 
 # Long timeout because video downloads can take a while; single worker keeps
 # the in-memory job dict consistent (jobs aren't shared across workers).
-CMD ["sh", "-c", "gunicorn -w 1 -k gthread --threads 8 --timeout 900 -b 0.0.0.0:${PORT:-8000} app:app"]
+# Extra threads give headroom for batch polling plus concurrent file transfers.
+CMD ["sh", "-c", "gunicorn -w 1 -k gthread --threads 16 --timeout 1800 -b 0.0.0.0:${PORT:-8000} app:app"]
