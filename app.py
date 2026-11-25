@@ -15,9 +15,11 @@ from typing import Optional
 
 from flask import Flask, abort, jsonify, render_template, request, send_file
 from yt_dlp import YoutubeDL
+from yt_dlp.plugins import load_all_plugins
 from yt_dlp.utils import DownloadError
+from yt_dlp.version import __version__ as YT_DLP_VERSION
 
-APP_VERSION = "2026.08.28-node22"
+APP_VERSION = "2026.11.25"
 
 # yt-dlp now needs a JavaScript runtime to solve YouTube's nsig/player
 # challenges. Its built-in default is Deno, which we don't ship; Node is in the
@@ -25,6 +27,9 @@ APP_VERSION = "2026.08.28-node22"
 # explicit path. Without a runtime, formats silently degrade and YouTube's
 # bot-check trips far more often. Resolved lazily-ish here so it's shared.
 NODE_PATH = shutil.which("node")
+
+# Load once before concurrent jobs initialize yt-dlp's global plugin registry.
+load_all_plugins()
 
 app = Flask(__name__)
 
@@ -357,6 +362,7 @@ def download_video(job_id: str, url: str, audio_only: bool = False) -> None:
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
+            "noprogress": True,
             "restrictfilenames": True,
             "retries": 20,
             "fragment_retries": 20,
@@ -437,7 +443,10 @@ def download_video(job_id: str, url: str, audio_only: bool = False) -> None:
                         elif matches:
                             filename = max(matches, key=lambda p: p.stat().st_size)
 
-                    if not audio_only and filename.exists():
+                    if not filename.is_file() or not filename.stat().st_size:
+                        raise DownloadError("The download finished without producing a playable file. Please retry.")
+
+                    if not audio_only:
                         _update(job_id, status="processing", progress=99)
                         filename = ensure_quicktime_compatible(filename)
 
@@ -480,9 +489,8 @@ def _friendly_error(msg: str, site: Optional[str]) -> str:
         if site == "twitter":
             return ("X/Twitter needs a logged-in session for this post. Add X cookies "
                     "and try again.")
-    if "confirm you" in msg and "not a bot" in msg:
-        return ("YouTube is blocking this server's IP. Add YouTube cookies "
-                "(YT_COOKIES_B64) to get past the bot check.")
+    if site == "youtube" and "not a bot" in msg.lower():
+        return "YouTube blocked downloads from this server for this link. You can try opening the original video."
     if "page needs to be reloaded" in msg.lower():
         return ("YouTube rejected the saved cookies (the browser session rotated "
                 "since they were exported). Re-export them from a private window "
@@ -599,7 +607,7 @@ def health():
     with jobs_lock:
         active = sum(1 for j in jobs.values() if j["status"] in ("queued", "downloading", "processing"))
         total = len(jobs)
-    return jsonify({"ok": True, "version": APP_VERSION, "jobs": total, "active": active})
+    return jsonify({"ok": True, "version": APP_VERSION, "yt_dlp": YT_DLP_VERSION, "jobs": total, "active": active})
 
 
 if __name__ == "__main__":

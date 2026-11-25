@@ -36,10 +36,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Extractors rot fast; pull the newest nightly on top of the stable pin.
-# Best-effort: never fail the build if the nightly channel is unavailable.
-RUN pip install --no-cache-dir --pre --upgrade "yt-dlp[default]" || true
-
 COPY . .
 
 EXPOSE 8000
