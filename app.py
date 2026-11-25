@@ -19,7 +19,7 @@ from yt_dlp.plugins import load_all_plugins
 from yt_dlp.utils import DownloadError
 from yt_dlp.version import __version__ as YT_DLP_VERSION
 
-APP_VERSION = "2026.11.25"
+APP_VERSION = "2026.11.25.2"
 
 # yt-dlp now needs a JavaScript runtime to solve YouTube's nsig/player
 # challenges. Its built-in default is Deno, which we don't ship; Node is in the
@@ -398,23 +398,27 @@ def download_video(job_id: str, url: str, audio_only: bool = False) -> None:
                 "merge_output_format": "mp4",
             })
 
-        # Cookies are not universally good. Instagram/X need them; YouTube is
-        # often *broken* by them (a session captured mid-rotation comes back as
-        # "The page needs to be reloaded"), yet needs them when the server's IP
-        # is bot-blocked. So try the order most likely to work, then fall back.
+        # Keep the default YouTube clients first. The existing PO token
+        # provider also supports the mobile-web client when defaults fail.
         if site == "youtube":
-            attempts = [False, True]      # clean first, cookies only if blocked
+            attempts = [(False, None)]
+            if pot_script:
+                attempts.append((False, "mweb"))
+            attempts.append((True, None))
         elif site in COOKIE_SITES:
-            attempts = [True, False]      # auth first, clean as a long shot
+            attempts = [(True, None), (False, None)]
         else:
-            attempts = [False]
+            attempts = [(False, None)]
 
         last_error = None
 
-        for use_cookies in attempts:
+        for use_cookies, player_client in attempts:
             opts = dict(ydl_opts)
-            opts.pop("cookiefile", None)
-            opts.pop("cookiesfrombrowser", None)
+            if player_client:
+                opts["extractor_args"] = {
+                    **ydl_opts["extractor_args"],
+                    "youtube": {"player_client": [player_client]},
+                }
             if use_cookies:
                 apply_cookies(opts, site)
                 if "cookiefile" not in opts and "cookiesfrombrowser" not in opts:
@@ -459,6 +463,10 @@ def download_video(job_id: str, url: str, audio_only: bool = False) -> None:
                     )
                     return
             except DownloadError as e:
+                if player_client and not _is_auth_error(str(e)):
+                    # An unsupported alternate format shouldn't prevent the
+                    # configured session from retrying the original request.
+                    continue
                 last_error = str(e)
                 if not _is_auth_error(last_error):
                     break
